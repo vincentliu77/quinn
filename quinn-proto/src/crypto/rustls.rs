@@ -188,6 +188,10 @@ impl crypto::Session for TlsSession {
             .map_err(|_| ExportKeyingMaterialError)?;
         Ok(())
     }
+
+    fn is_jls(&self) -> Option<bool> {
+        self.inner.jls_authed
+    }
 }
 
 const RETRY_INTEGRITY_KEY_DRAFT: [u8; 16] = [

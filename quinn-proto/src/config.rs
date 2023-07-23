@@ -609,6 +609,9 @@ pub struct ServerConfig {
     /// Must be set to use TLS 1.3 only.
     pub crypto: Arc<dyn crypto::ServerConfig>,
 
+    /// JLS server config
+    pub jls_config: Arc<JlsServerConfig>,
+
     /// Used to generate one-time AEAD keys to protect handshake tokens
     pub(crate) token_key: Arc<dyn HandshakeTokenKey>,
 
@@ -646,6 +649,7 @@ impl ServerConfig {
             concurrent_connections: 100_000,
 
             migration: true,
+            jls_config: JlsServerConfig::default().into(),
         }
     }
 
@@ -867,5 +871,20 @@ impl std::convert::TryFrom<Duration> for IdleTimeout {
     fn try_from(timeout: Duration) -> Result<Self, Self::Error> {
         let inner = VarInt::try_from(timeout.as_millis())?;
         Ok(Self(inner))
+    }
+}
+
+/// JLS Server forward config
+#[derive(Clone, Default, Debug)]
+pub struct JlsServerConfig {
+    /// Fallback upstream url. Example: ahrefs.com:443
+    pub upstream_url: Option<String>,
+}
+impl JlsServerConfig {
+    /// Create a JlsServerConfig with given upstream url
+    pub fn new(url: &str) -> Self {
+        JlsServerConfig {
+            upstream_url: Some(url.clone().into()),
+        }
     }
 }

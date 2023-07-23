@@ -2425,6 +2425,22 @@ impl Connection {
             .pending_acks
             .packet_received(ack_eliciting);
 
+        // Stop sending serverhello if jls authentication failed
+        match self.crypto.is_jls() {
+            Some(true) => {
+                debug!("JLS authenticated");
+            }
+            Some(false) => {
+                warn!("JLS authentication falied");
+                if self.side() == Side::Server {
+                    return Ok(());
+                }
+            }
+            None => {
+                warn!("JLS not authenticated");
+            }
+        }
+
         self.write_crypto();
         Ok(())
     }

@@ -551,10 +551,32 @@ impl Endpoint {
         if dst_cid.len() != 0 {
             self.index.insert_initial(dst_cid, ch);
         }
+        let packet_clone = Packet {
+            header: packet.header.clone(),
+            header_data: packet.header_data.clone(),
+            payload: packet.payload.clone(),
+        };
         match conn.handle_first_packet(now, addresses.remote, ecn, packet_number, packet, rest) {
             Ok(()) => {
-                trace!(id = ch.0, icid = %dst_cid, "connection incoming");
-                Some(DatagramEvent::NewConnection(ch, conn))
+                // Reconstruct client hello to forward to upstream
+                if conn.crypto_session().is_jls() == Some(false) {
+                    debug!("start forward connection");
+                    let mut buf = BytesMut::default();
+                    let partial_encode = packet_clone.header.encode(&mut buf);
+                    buf.extend_from_slice(&packet_clone.payload);
+                    partial_encode.finish(
+                        &mut buf,
+                        crypto.header.remote.as_ref(),
+                        Some((packet_number, crypto.packet.remote.as_ref())),
+                    );
+                    // Remove connection information added by add_connection function
+                    let conn_meta = self.connections.remove(ch.0);
+                    self.index.remove(&conn_meta);
+                    Some(DatagramEvent::NewForward(ch, conn, buf))
+                } else {
+                    trace!(id = ch.0, icid = %dst_cid, "connection incoming");
+                    Some(DatagramEvent::NewConnection(ch, conn))
+                }
             }
             Err(e) => {
                 debug!("handshake failed: {}", e);
@@ -684,6 +706,11 @@ impl Endpoint {
     #[cfg(test)]
     pub(crate) fn known_cids(&self) -> usize {
         self.index.connection_ids.len()
+    }
+
+    /// Access Server Config
+    pub fn server_config(&self) -> Option<&ServerConfig> {
+        self.server_config.as_ref().map(|x| x.as_ref())
     }
 
     /// Whether we've used up 3/4 of the available CID space
@@ -851,6 +878,9 @@ pub enum DatagramEvent {
     NewConnection(ConnectionHandle, Connection),
     /// Response generated directly by the endpoint
     Response(Transmit),
+    /// JLS: Forward connection.
+    /// BytesMut is the clienthello to forward
+    NewForward(ConnectionHandle, Connection, BytesMut),
 }
 
 /// Errors in the parameters being used to create a new connection

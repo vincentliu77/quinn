@@ -1,10 +1,10 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     future::Future,
     io,
     io::IoSliceMut,
     mem::MaybeUninit,
-    net::{SocketAddr, SocketAddrV6},
+    net::{SocketAddr, SocketAddrV6, ToSocketAddrs},
     pin::Pin,
     str,
     sync::{Arc, Mutex},
@@ -20,7 +20,8 @@ use proto::{
 };
 use rustc_hash::FxHashMap;
 use tokio::sync::{futures::Notified, mpsc, Notify};
-use udp::{RecvMeta, UdpState, BATCH_SIZE};
+use tracing::{debug, trace};
+use udp::{RecvMeta, Transmit, UdpState, BATCH_SIZE};
 
 use crate::{
     connection::Connecting, work_limiter::WorkLimiter, ConnectionEvent, EndpointConfig,
@@ -316,6 +317,9 @@ impl Future for EndpointDriver {
         keep_going |= endpoint.drive_recv(cx, now)?;
         keep_going |= endpoint.handle_events(cx, &self.0.shared);
         keep_going |= endpoint.drive_send(cx)?;
+        //JLS forward
+        keep_going |= endpoint.upstream_recv(cx, now)?;
+        keep_going |= endpoint.upstream_send(cx, now)?;
 
         if !endpoint.incoming.is_empty() {
             self.0.shared.incoming.notify_waiters();
@@ -373,6 +377,44 @@ pub(crate) struct State {
     runtime: Arc<dyn Runtime>,
     /// The aggregateed contents length of the packets in the transmit queue
     transmit_queue_contents_len: usize,
+    /// JLS state
+    jls_state: JlsState,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct JlsState {
+    upstream_connections: HashMap<SocketAddr, JlsForwardConnection>,
+}
+
+impl JlsState {
+    fn handle_jls_forward(
+        &mut self,
+        buf: &BytesMut,
+        remote: &SocketAddr,
+        upstream_addr: &Option<String>,
+    ) -> bool {
+        if let Some(url) = upstream_addr {
+            match self.upstream_connections.get_mut(remote) {
+                Some(conn) => {
+                    let trans = upstream_udp_transmit(&url, buf.clone());
+                    conn.to_upstream.push_back(trans);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct JlsForwardConnection {
+    upstream_socket: Box<dyn AsyncUdpSocket>,
+    to_upstream: VecDeque<udp::Transmit>,
+    from_upstream: Box<[u8]>,
+    udp_state: Arc<UdpState>,
+    active_time: Instant,
 }
 
 #[derive(Debug)]
@@ -383,6 +425,7 @@ pub(crate) struct Shared {
 
 impl State {
     fn drive_recv<'a>(&'a mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
+        let upstream_addr = self.get_upstream_url();
         self.recv_limiter.start_cycle();
         let mut metas = [RecvMeta::default(); BATCH_SIZE];
         let mut iovs = MaybeUninit::<[IoSliceMut<'a>; BATCH_SIZE]>::uninit();
@@ -404,47 +447,94 @@ impl State {
                         let mut data: BytesMut = buf[0..meta.len].into();
                         while !data.is_empty() {
                             let buf = data.split_to(meta.stride.min(data.len()));
-                            match self.inner.handle(
-                                now,
-                                meta.addr,
-                                meta.dst_ip,
-                                meta.ecn.map(proto_ecn),
-                                buf,
-                            ) {
-                                Some(DatagramEvent::NewConnection(handle, conn)) => {
-                                    let conn = self.connections.insert(
-                                        handle,
-                                        conn,
-                                        self.udp_state.clone(),
-                                        self.runtime.clone(),
-                                    );
-                                    self.incoming.push_back(conn);
-                                }
-                                Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-                                    // Ignoring errors from dropped connections that haven't yet been cleaned up
-                                    let _ = self
-                                        .connections
-                                        .senders
-                                        .get_mut(&handle)
-                                        .unwrap()
-                                        .send(ConnectionEvent::Proto(event));
-                                }
-                                Some(DatagramEvent::Response(t)) => {
-                                    // Limiting the memory usage for items queued in the outgoing queue from endpoint
-                                    // generated packets. Otherwise, we may see a build-up of the queue under test with
-                                    // flood of initial packets against the endpoint. The sender with the sender-limiter
-                                    // may not keep up the pace of these packets queued into the queue.
-                                    if self.transmit_queue_contents_len
-                                        < MAX_TRANSMIT_QUEUE_CONTENTS_LEN
-                                    {
-                                        let contents_len = t.contents.len();
-                                        self.outgoing.push_back(udp_transmit(t));
-                                        self.transmit_queue_contents_len = self
-                                            .transmit_queue_contents_len
-                                            .saturating_add(contents_len);
+                            if self
+                                .jls_state
+                                .handle_jls_forward(&buf, &meta.addr, &upstream_addr)
+                            {
+                                continue;
+                            } else {
+                                match self.inner.handle(
+                                    now,
+                                    meta.addr,
+                                    meta.dst_ip,
+                                    meta.ecn.map(proto_ecn),
+                                    buf,
+                                ) {
+                                    Some(DatagramEvent::NewConnection(handle, conn)) => {
+                                        let conn = self.connections.insert(
+                                            handle,
+                                            conn,
+                                            self.udp_state.clone(),
+                                            self.runtime.clone(),
+                                        );
+                                        self.incoming.push_back(conn);
                                     }
+                                    Some(DatagramEvent::ConnectionEvent(handle, event)) => {
+                                        // Ignoring errors from dropped connections that haven't yet been cleaned up
+                                        let _ = self
+                                            .connections
+                                            .senders
+                                            .get_mut(&handle)
+                                            .unwrap()
+                                            .send(ConnectionEvent::Proto(event));
+                                    }
+                                    Some(DatagramEvent::Response(t)) => {
+                                        // Limiting the memory usage for items queued in the outgoing queue from endpoint
+                                        // generated packets. Otherwise, we may see a build-up of the queue under test with
+                                        // flood of initial packets against the endpoint. The sender with the sender-limiter
+                                        // may not keep up the pace of these packets queued into the queue.
+                                        if self.transmit_queue_contents_len
+                                            < MAX_TRANSMIT_QUEUE_CONTENTS_LEN
+                                        {
+                                            let contents_len = t.contents.len();
+                                            self.outgoing.push_back(udp_transmit(t));
+                                            self.transmit_queue_contents_len = self
+                                                .transmit_queue_contents_len
+                                                .saturating_add(contents_len);
+                                        }
+                                    }
+                                    Some(DatagramEvent::NewForward(
+                                        _ch,
+                                        conn,
+                                        client_hello_buf,
+                                    )) => {
+                                        if let Some(upstream_addr) = upstream_addr.clone() {
+                                            debug!("new forward connection");
+                                            let socket = std::net::UdpSocket::bind(
+                                                "[::]:0".parse::<SocketAddr>().unwrap(),
+                                            )?;
+                                            let udp_socket =
+                                                self.runtime.wrap_udp_socket(socket).unwrap();
+                                            let udp_state = UdpState::new();
+                                            let recv_buf = vec![
+                                                0;
+                                                self.inner
+                                                    .config()
+                                                    .get_max_udp_payload_size()
+                                                    .min(64 * 1024)
+                                                    as usize
+                                                    * udp_state.gro_segments()
+                                                    * BATCH_SIZE
+                                            ];
+                                            let mut jls_conn = JlsForwardConnection {
+                                                upstream_socket: udp_socket,
+                                                to_upstream: VecDeque::new(),
+                                                from_upstream: recv_buf.into(),
+                                                active_time: now.clone(),
+                                                udp_state: udp_state.into(),
+                                            };
+                                            let trans = upstream_udp_transmit(
+                                                &upstream_addr,
+                                                client_hello_buf,
+                                            );
+                                            jls_conn.to_upstream.push_back(trans);
+                                            self.jls_state
+                                                .upstream_connections
+                                                .insert(conn.remote_address(), jls_conn);
+                                        }
+                                    }
+                                    None => {}
                                 }
-                                None => {}
                             }
                         }
                     }
@@ -550,6 +640,126 @@ impl State {
 
         true
     }
+
+    fn upstream_recv<'a>(&'a mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
+        let mut last_err: Option<io::Error> = None;
+        let mut to_remove = Vec::<SocketAddr>::new();
+        let upstream_conns = &mut self.jls_state.upstream_connections;
+        for (remote, conn) in upstream_conns.iter_mut() {
+            let mut metas = [RecvMeta::default(); BATCH_SIZE];
+            let mut iovs = MaybeUninit::<[IoSliceMut<'a>; BATCH_SIZE]>::uninit();
+            conn.from_upstream
+                .chunks_mut(conn.from_upstream.len() / BATCH_SIZE)
+                .enumerate()
+                .for_each(|(i, buf)| unsafe {
+                    iovs.as_mut_ptr()
+                        .cast::<IoSliceMut>()
+                        .add(i)
+                        .write(IoSliceMut::<'a>::new(buf));
+                });
+            let mut iovs = unsafe { iovs.assume_init() };
+            loop {
+                match conn.upstream_socket.poll_recv(cx, &mut iovs, &mut metas) {
+                    Poll::Ready(Ok(msgs)) => {
+                        for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
+                            let mut data: BytesMut = buf[0..meta.len].into();
+                            while !data.is_empty() {
+                                let buf = data.split_to(meta.stride.min(data.len()));
+                                if self.transmit_queue_contents_len
+                                    < MAX_TRANSMIT_QUEUE_CONTENTS_LEN
+                                {
+                                    let trans = Transmit {
+                                        destination: remote.clone(),
+                                        contents: buf.into(),
+                                        ecn: None,
+                                        segment_size: None,
+                                        src_ip: None,
+                                    };
+                                    let contents_len = trans.contents.len();
+                                    self.outgoing.push_back(trans);
+                                    self.transmit_queue_contents_len = self
+                                        .transmit_queue_contents_len
+                                        .saturating_add(contents_len);
+                                    trace!("recv from upstream: {:?} bytes", contents_len);
+                                }
+                            }
+                        }
+                        conn.active_time = now;
+                    }
+                    Poll::Pending => {
+                        if now.duration_since(conn.active_time).as_secs() > 30 {
+                            to_remove.push(remote.clone());
+                            //trace!("remove old forward connection from {:?}", remote);
+                        }
+                        break;
+                    }
+                    Poll::Ready(Err(ref e)) if e.kind() == io::ErrorKind::ConnectionReset => {
+                        continue;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        last_err = Some(e);
+                        to_remove.push(remote.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        // TODO remove old connections
+        // for k in to_remove.iter() {
+        //     upstream_conns.remove(k);
+        // }
+        if let Some(e) = last_err {
+            Err(e)
+        } else {
+            Ok(false)
+        }
+    }
+    fn upstream_send(&mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
+        let mut to_remove = Vec::<SocketAddr>::new();
+        let mut last_err: Option<io::Error> = None;
+        for (remote, conn) in self.jls_state.upstream_connections.iter_mut() {
+            loop {
+                if conn.to_upstream.is_empty() {
+                    break;
+                }
+                match conn.upstream_socket.poll_send(
+                    &conn.udp_state,
+                    cx,
+                    conn.to_upstream.as_slices().0,
+                ) {
+                    Poll::Ready(Ok(n)) => {
+                        let contents_len: usize =
+                            conn.to_upstream.drain(..n).map(|t| t.contents.len()).sum();
+                        trace!("forward to upstream: {:?} bytes", contents_len);
+                        conn.active_time = now;
+                    }
+                    Poll::Pending => {
+                        if conn.active_time.duration_since(conn.active_time).as_secs() > 30 {
+                            to_remove.push(remote.clone());
+                            trace!("remove old forward connection from {:?}", remote);
+                        }
+                        break;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        last_err = Some(e);
+                        to_remove.push(remote.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        for remote in to_remove {
+            self.jls_state.upstream_connections.remove(&remote);
+        }
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+        Ok(false)
+    }
+    fn get_upstream_url(&self) -> Option<String> {
+        self.inner.server_config()?.jls_config.upstream_url.clone()
+    }
 }
 
 #[inline]
@@ -578,6 +788,21 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
         udp::EcnCodepoint::Ect0 => proto::EcnCodepoint::Ect0,
         udp::EcnCodepoint::Ect1 => proto::EcnCodepoint::Ect1,
         udp::EcnCodepoint::Ce => proto::EcnCodepoint::Ce,
+    }
+}
+
+fn upstream_udp_transmit(addr: &str, data: BytesMut) -> Transmit {
+    let remote = addr
+        .to_socket_addrs()
+        .expect("failed to resolve upstream domain")
+        .next()
+        .expect("failed to resolve upstream domain");
+    Transmit {
+        contents: data.into(),
+        destination: remote,
+        ecn: None,
+        segment_size: None,
+        src_ip: None,
     }
 }
 
@@ -703,6 +928,7 @@ impl EndpointRef {
                 send_limiter: WorkLimiter::new(SEND_TIME_BOUND),
                 runtime,
                 transmit_queue_contents_len: 0,
+                jls_state: JlsState::default(),
             }),
         }))
     }

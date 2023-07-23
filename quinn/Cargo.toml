@@ -41,11 +41,12 @@ futures-io = { version = "0.3.19", optional = true }
 rustc-hash = "1.1"
 pin-project-lite = "0.2"
 proto = { package = "quinn-proto", path = "../quinn-proto", version = "0.11", default-features = false }
-rustls = { version = "0.21.0", default-features = false, features = ["quic"], optional = true }
+rustls = { git="https://github.com/vincentliu77/rustls", branch="jls3-dev",default-features=false,features = ["quic","logging"], optional = true }
 thiserror = "1.0.21"
 tracing = "0.1.10"
 tokio = { version = "1.28.1", features = ["sync"] }
 udp = { package = "quinn-udp", path = "../quinn-udp", version = "0.4", default-features = false }
+webpki-roots = "0.24.0"
 
 [dev-dependencies]
 anyhow = "1.0.22"

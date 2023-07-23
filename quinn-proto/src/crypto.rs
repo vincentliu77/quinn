@@ -91,6 +91,9 @@ pub trait Session: Send + 'static {
         label: &[u8],
         context: &[u8],
     ) -> Result<(), ExportKeyingMaterialError>;
+
+    /// return true if it's a authenticated JLS connection
+    fn is_jls(&self) -> Option<bool>;
 }
 
 /// A pair of keys for bidirectional communication
