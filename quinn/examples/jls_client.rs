@@ -100,7 +100,7 @@ async fn run(options: Opt) -> Result<()> {
 
     client_crypto.alpn_protocols = common::ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
     client_crypto.alpn_protocols.append(&mut vec![b"h3".to_vec(),b"h3-29".to_vec()]);
-    client_crypto.jls_config = JlsConfig::new("user_pw", "user_iv");
+    client_crypto.jls_config = JlsConfig::new("user_pwd", "user_iv");
     if options.keylog {
         client_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
     }
