@@ -136,7 +136,7 @@ async fn run(options: Opt) -> Result<()> {
 
     let mut server_config: proto::ServerConfig =
         quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
-    server_config.jls_config = proto::JlsServerConfig::new("codepen.io:443").into();
+    server_config.jls_config = quinn::JlsServerConfig::new("codepen.io:443").into();
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
     if options.stateless_retry {
