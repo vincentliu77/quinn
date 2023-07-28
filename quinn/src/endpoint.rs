@@ -794,9 +794,9 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
 fn upstream_udp_transmit(addr: &str, data: BytesMut) -> Transmit {
     let remote = addr
         .to_socket_addrs()
-        .expect("failed to resolve upstream domain")
+        .expect(&format!("failed to resolve upstream domain: {:?}",addr))
         .next()
-        .expect("failed to resolve upstream domain");
+        .expect(&format!("failed to resolve upstream domain: {:?}",addr));
     Transmit {
         contents: data.into(),
         destination: remote,
