@@ -1,129 +1,35 @@
-<h1 align="center"><img width="500" src="https://raw.githubusercontent.com/quinn-rs/quinn/51a3cea225670757cb844a342428e4e1341d9f13/docs/thumbnail.svg" /></h1>
+# Quinn-jls
+[中文](./README.md)|[English](./README_en.md)
 
-[![Documentation](https://docs.rs/quinn/badge.svg)](https://docs.rs/quinn/)
-[![Crates.io](https://img.shields.io/crates/v/quinn.svg)](https://crates.io/crates/quinn)
-[![Build status](https://github.com/quinn-rs/quinn/workflows/CI/badge.svg)](https://github.com/djc/quinn/actions?query=workflow%3ACI)
-[![codecov](https://codecov.io/gh/quinn-rs/quinn/branch/main/graph/badge.svg)](https://codecov.io/gh/quinn-rs/quinn)
-[![Chat](https://img.shields.io/badge/chat-%23quinn:matrix.org-%2346BC99?logo=matrix)](https://matrix.to/#/#quinn:matrix.org)
-[![Chat](https://badges.gitter.im/gitterHQ/gitter.svg)](https://gitter.im/djc/quinn)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
+Quinn-jls 是 [quinn](https://github.com/quinn-rs/quinn) 的fork 分支，该库将QUIC的tls层替换为 [JLS](https://github.com/JimmyHuang454/JLS)协议，以实现
+高性能，低延迟的抗白名单封锁的代理协议
 
-Quinn is a pure-rust, async-compatible implementation of the IETF [QUIC][quic] transport protocol.
+## 特性
+* 基于QUIC的多路复用
+* 用户层的BBR拥塞控制
+* 基于QUIC和tls1.3的0rtt握手
+* SNI伪装（Http3网站）
+* 无需域名和证书（自签或自动生成）
+* 非JLS客户端自动进行UDP转发
 
-## Features
+## 关于 0 RTT
+即便0rtt被使能了，也不一定能实现0rtt握手，0rtt握手有
+严格的要求，不符合这些要求的握手将退化为1rtt握手：
+* 服务器和客户端必须同时在内存中有0rtt密钥，也就是说，二者
+必须曾经建立过连接，内存中有对方的缓存信息。因此刚启动的客户端一定会使用1rtt握手
+* 0rtt密钥没有过期，如果服务器和客户端曾经建立过连接，但连接断开时间过久（数个小时），此时0rtt密钥过期，0rtt握手会被拒绝，此时将使用1rtt握手
 
-- Simultaneous client/server operation
-- Ordered and unordered stream reads for improved performance
-- Works on stable Rust, tested on Linux, macOS and Windows
-- Pluggable cryptography, with a standard implementation backed by
-  [rustls][rustls] and [*ring*][ring]
-- Application-layer datagrams for small, unreliable messages
-- Future-based async API
-- Minimum supported Rust version of 1.63.0
 
-## Overview
+### 0 RTT 的安全问题
+0 RTT基于TLS1.3. TLS1.3 0RTT功能被广泛认为会遭受重放攻击。然而，个人认为这一安全问题被放大了，尤其是使用单服务器的代理。成功的重放攻击的条件是及其严苛的，它要求至少
+有两个服务器使用同一域名（通常大型公司的网站）
 
-- **quinn:** High-level async API based on tokio, see [examples][examples] for usage. This will be used by most developers. (Basic benchmarks are included.)
-- **quinn-proto:** Deterministic state machine of the protocol which performs [**no** I/O][sans-io] internally and is suitable for use with custom event loops (and potentially a C or C++ API).
-- **quinn-udp:** UDP sockets with ECN information tuned for the protocol.
-- **bench:** Benchmarks without any framework.
-- **fuzz:** Fuzz tests.
+根据 [RFC 8446 Section 8](https://datatracker.ietf.org/doc/html/rfc8446#page-98). 通常有两种类型的
+* 第一种重放攻击直接重放0RTT握手，一般TLS协议实现的0RTT密钥至多只能使用一次，该攻击不会生效。
 
-# Getting Started
+* 第二种更复杂一点。它要求至少有两台服务器使用同一域名，
+假设客户端和服务器A建立过连接，连接断开后尝试使用0RTT握手，
+此时中间人捕获并拦截了0RTT信息。由于重连接机制的存在，客户端会尝试使用1RTT进行连接，此时中间人将该连接重定向到使用同一证书的服务器B，然后用捕获的0RTT信息去和服务器A进行握手，此时数据可能被重放。
 
-**Examples**
-
-```sh
-$ cargo run --example server ./
-$ cargo run --example client https://localhost:4433/Cargo.toml
-```
-
-This launches an HTTP 0.9 server on the loopback address serving the current
-working directory, with the client fetching `./Cargo.toml`. By default, the
-server generates a self-signed certificate and stores it to disk, where the
-client will automatically find and trust it.
-
-**Links**
-
-- Talk at [RustFest Paris (May 2018) presentation][talk]; [slides][slides]; [YouTube][youtube]
-- Usage [examples][examples]
-- Guide [book][documentation]
-
-## Usage Notes
-
-<details>
-<summary>
-Click to show the notes
-</summary>
-
-### Buffers
-
-A Quinn endpoint corresponds to a single UDP socket, no matter how many
-connections are in use. Handling high aggregate data rates on a single endpoint
-can require a larger UDP buffer than is configured by default in most
-environments. If you observe erratic latency and/or throughput over a stable
-network link, consider increasing the buffer sizes used. For example, you could
-adjust the `SO_SNDBUF` and `SO_RCVBUF` options of the UDP socket to be used
-before passing it in to Quinn. Note that some platforms (e.g. Linux) require
-elevated privileges or modified system configuration for a process to increase
-its UDP buffer sizes.
-
-### Certificates
-
-By default, Quinn clients validate the cryptographic identity of servers they
-connect to. This prevents an active, on-path attacker from intercepting
-messages, but requires trusting some certificate authority. For many purposes,
-this can be accomplished by using certificates from [Let's Encrypt][letsencrypt]
-for servers, and relying on the default configuration for clients.
-
-For some cases, including peer-to-peer, trust-on-first-use, deliberately
-insecure applications, or any case where servers are not identified by domain
-name, this isn't practical. Arbitrary certificate validation logic can be
-implemented by enabling the `dangerous_configuration` feature of `rustls` and
-constructing a Quinn `ClientConfig` with an overridden certificate verifier by
-hand.
-
-When operating your own certificate authority doesn't make sense, [rcgen][rcgen]
-can be used to generate self-signed certificates on demand. To support
-trust-on-first-use, servers that automatically generate self-signed certificates
-should write their generated certificate to persistent storage and reuse it on
-future runs.
-
-</details>
-<p></p>
-
-## Contribution
-
-All feedback welcome. Feel free to file bugs, requests for documentation and
-any other feedback to the [issue tracker][issues].
-
-The quinn-proto test suite uses simulated IO for reproducibility and to avoid
-long sleeps in certain timing-sensitive tests. If the `SSLKEYLOGFILE`
-environment variable is set, the tests will emit UDP packets for inspection
-using external protocol analyzers like Wireshark, and NSS-compatible key logs
-for the client side of each connection will be written to the path specified in
-the variable.
-
-The minimum supported Rust version for published releases of our
-crates will always be at least 6 months old at the time of release.
-
-## Authors
-
-* **Dirkjan Ochtman** - *Project owner & founder*
-* **Benjamin Saunders** - *Project owner & founder*
-* **Jean-Christophe Begue** - *Project collaborator, author of the HTTP/3 Implementation*
-
-[quic]: https://quicwg.github.io/
-[issues]: https://github.com/djc/quinn/issues
-[rustls]: https://github.com/ctz/rustls
-[ring]: https://github.com/briansmith/ring
-[talk]: https://paris.rustfest.eu/sessions/a-quic-future-in-rust
-[slides]: https://github.com/djc/talks/blob/ff760845b51ba4836cce82e7f2c640ecb5fd59fa/2018-05-26%20A%20QUIC%20future%20in%20Rust/Quinn-Speaker.pdf
-[animation]: https://dirkjan.ochtman.nl/files/head-of-line-blocking.html
-[youtube]: https://www.youtube.com/watch?v=EHgyY5DNdvI
-[letsencrypt]: https://letsencrypt.org/
-[rcgen]: https://crates.io/crates/rcgen
-[examples]: https://github.com/djc/quinn/tree/main/quinn/examples
-[documentation]: https://quinn-rs.github.io/quinn/networking-introduction.html
-[sans-io]: https://sans-io.readthedocs.io/how-to-sans-io.html
+对大多数用户来说，他们不会使用服务器集群部署QUIC，因此
+不会遭受重放攻击。
