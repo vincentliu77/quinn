@@ -1,5 +1,6 @@
 use std::{fmt, num::TryFromIntError, sync::Arc, time::Duration};
 
+use rustls::JlsServerConfig;
 use thiserror::Error;
 
 #[cfg(feature = "ring")]
@@ -874,17 +875,3 @@ impl std::convert::TryFrom<Duration> for IdleTimeout {
     }
 }
 
-/// JLS Server forward config
-#[derive(Clone, Default, Debug)]
-pub struct JlsServerConfig {
-    /// Fallback upstream url. Example: ahrefs.com:443
-    pub upstream_url: Option<String>,
-}
-impl JlsServerConfig {
-    /// Create a JlsServerConfig with given upstream url
-    pub fn new(url: &str) -> Self {
-        JlsServerConfig {
-            upstream_url: Some(url.clone().into()),
-        }
-    }
-}

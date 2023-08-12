@@ -52,7 +52,7 @@ pub use crate::connection::{
 mod config;
 pub use config::{
     ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig,
-    TransportConfig,JlsServerConfig,
+    TransportConfig,
 };
 
 pub mod crypto;

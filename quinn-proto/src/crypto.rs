@@ -8,7 +8,7 @@
 //! Note that usage of any protocol (version) other than TLS 1.3 does not conform to any
 //! published versions of the specification, and will not be supported in QUIC v1.
 
-use std::{any::Any, str, sync::Arc};
+use std::{any::Any, str, sync::Arc, net::SocketAddr};
 
 use bytes::BytesMut;
 
@@ -94,6 +94,10 @@ pub trait Session: Send + 'static {
 
     /// return true if it's a authenticated JLS connection
     fn is_jls(&self) -> Option<bool>;
+
+    /// Return the jls forward upstream addr return None if not found or it's 
+    /// authentic jls connection
+    fn jls_upstream_addr(&self) -> Option<SocketAddr>;
 }
 
 /// A pair of keys for bidirectional communication

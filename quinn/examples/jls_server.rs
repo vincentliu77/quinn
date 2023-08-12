@@ -129,14 +129,14 @@ async fn run(options: Opt) -> Result<()> {
     server_crypto
         .alpn_protocols
         .append(&mut vec![b"h3".to_vec(), b"h3-29".to_vec()]);
-    server_crypto.jls_config = JlsConfig::new("user_pwd", "user_iv");
+    server_crypto.jls_config = rustls::JlsServerConfig::new("user_pwd", "user_iv","https://codepen.io:443").unwrap();
+    server_crypto.jls_config.push_sni("www.visa.cn", "https://www.visa.cn:443").unwrap();
     if options.keylog {
         server_crypto.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
     let mut server_config: proto::ServerConfig =
         quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
-    server_config.jls_config = quinn::JlsServerConfig::new("codepen.io:443").into();
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
     if options.stateless_retry {

@@ -63,7 +63,7 @@ mod work_limiter;
 pub use proto::{
     congestion, crypto, ApplicationClose, Chunk, ClientConfig, ConfigError, ConnectError,
     ConnectionClose, ConnectionError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
-    ServerConfig, StreamId, Transmit, TransportConfig, VarInt, JlsServerConfig,
+    ServerConfig, StreamId, Transmit, TransportConfig, VarInt,
 };
 pub use udp;
 

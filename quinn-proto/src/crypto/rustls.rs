@@ -192,6 +192,17 @@ impl crypto::Session for TlsSession {
     fn is_jls(&self) -> Option<bool> {
         self.inner.jls_authed
     }
+
+    fn jls_upstream_addr(&self) -> Option<std::net::SocketAddr> {
+        match &self.inner {
+            Connection::Server(conn) => {
+                return conn.get_upstream_addr();
+            },
+            Connection::Client(_) => {
+                panic!("tls client doesn't implement upstream addr");
+            }
+        }
+    }
 }
 
 const RETRY_INTEGRITY_KEY_DRAFT: [u8; 16] = [

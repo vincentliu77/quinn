@@ -391,26 +391,22 @@ impl JlsState {
         &mut self,
         buf: &BytesMut,
         remote: &SocketAddr,
-        upstream_addr: &Option<String>,
     ) -> bool {
-        if let Some(url) = upstream_addr {
             match self.upstream_connections.get_mut(remote) {
                 Some(conn) => {
-                    let trans = upstream_udp_transmit(&url, buf.clone());
+                    let trans = upstream_udp_transmit(&conn.upstream_addr, buf.clone());
                     conn.to_upstream.push_back(trans);
                     true
                 }
                 None => false,
             }
-        } else {
-            false
-        }
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct JlsForwardConnection {
     upstream_socket: Box<dyn AsyncUdpSocket>,
+    upstream_addr: SocketAddr,
     to_upstream: VecDeque<udp::Transmit>,
     from_upstream: Box<[u8]>,
     udp_state: Arc<UdpState>,
@@ -425,7 +421,6 @@ pub(crate) struct Shared {
 
 impl State {
     fn drive_recv<'a>(&'a mut self, cx: &mut Context, now: Instant) -> Result<bool, io::Error> {
-        let upstream_addr = self.get_upstream_url();
         self.recv_limiter.start_cycle();
         let mut metas = [RecvMeta::default(); BATCH_SIZE];
         let mut iovs = MaybeUninit::<[IoSliceMut<'a>; BATCH_SIZE]>::uninit();
@@ -449,7 +444,7 @@ impl State {
                             let buf = data.split_to(meta.stride.min(data.len()));
                             if self
                                 .jls_state
-                                .handle_jls_forward(&buf, &meta.addr, &upstream_addr)
+                                .handle_jls_forward(&buf, &meta.addr)
                             {
                                 continue;
                             } else {
@@ -498,7 +493,7 @@ impl State {
                                         conn,
                                         client_hello_buf,
                                     )) => {
-                                        if let Some(upstream_addr) = upstream_addr.clone() {
+                                        if let Some(upstream_addr) = conn.crypto_session().jls_upstream_addr() {
                                             debug!("new forward connection");
                                             let socket = std::net::UdpSocket::bind(
                                                 "[::]:0".parse::<SocketAddr>().unwrap(),
@@ -518,6 +513,7 @@ impl State {
                                             ];
                                             let mut jls_conn = JlsForwardConnection {
                                                 upstream_socket: udp_socket,
+                                                upstream_addr:upstream_addr,
                                                 to_upstream: VecDeque::new(),
                                                 from_upstream: recv_buf.into(),
                                                 active_time: now.clone(),
@@ -757,9 +753,9 @@ impl State {
         }
         Ok(false)
     }
-    fn get_upstream_url(&self) -> Option<String> {
-        self.inner.server_config()?.jls_config.upstream_url.clone()
-    }
+    // fn get_upstream_url(&self) -> Option<String> {
+    //     self.inn
+    // }
 }
 
 #[inline]
@@ -791,15 +787,11 @@ fn proto_ecn(ecn: udp::EcnCodepoint) -> proto::EcnCodepoint {
     }
 }
 
-fn upstream_udp_transmit(addr: &str, data: BytesMut) -> Transmit {
-    let remote = addr
-        .to_socket_addrs()
-        .expect(&format!("failed to resolve upstream domain: {:?}",addr))
-        .next()
-        .expect(&format!("failed to resolve upstream domain: {:?}",addr));
+fn upstream_udp_transmit(addr: &SocketAddr, data: BytesMut) -> Transmit {
+    let remote = addr;
     Transmit {
         contents: data.into(),
-        destination: remote,
+        destination: remote.clone(),
         ecn: None,
         segment_size: None,
         src_ip: None,
